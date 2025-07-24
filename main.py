@@ -1,4 +1,3 @@
-import fitz  
 import os
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import faiss
@@ -9,43 +8,47 @@ from openai import OpenAI
 client = OpenAI(api_key="")  # یا "your-api-key" را اینجا بذار
 
 
-# 1. استخراج متن از PDFها
-def extract_text_from_pdf(path):
-    text = ""
-    with fitz.open(path) as doc:
-        for page in doc:
-            text += page.get_text()
-    return text
+#  استخراج متن از فایل‌های متنی (.txt)
+def extract_text_from_txt(path):
+    with open(path, "r", encoding="utf-8") as f:
+         return f.read()
 
-documents = []
-for file in os.listdir("data/pdfs"):
-    if file.endswith(".pdf"):
-        content = extract_text_from_pdf(f"data/pdfs/{file}")
-        if content.strip():
-            documents.append({"filename": file, "content": content})
-        else:
-            print(f"Warning: file {file} has no text.")
+# خواندن تمام فایل‌های متنی از پوشه مشخص‌شده
+def load_documents_from_folder(folder_path):
+    documents = []
+    for file in os.listdir(folder_path):
+        if not file.endswith(".txt"):
+            print(f"Warning: file {file} is not a .txt file and will be skipped.")
+        if file.endswith(".txt"):
+            content = extract_text_from_txt(os.path.join(folder_path, file))
+            if content.strip():
+                documents.append({"filename": file, "content": content})
+            else:
+                print(f"Warning: file {file} has no text.")
+    return documents
 
-        
+       
     
 # 2. تقسیم متن به چانک‌های کوچک‌تر
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=800,
-    chunk_overlap=200,
-    separators=["\n\n", "\n", " ", ""]
-)
+def split_documents(documents):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=200,
+        separators=["\n\n", "\n", " ", ""]
+    )
 
-texts = []
-for doc in documents:
-    chunks = splitter.split_text(doc["content"])
-    for i, chunk in enumerate(chunks):
-        texts.append({
-            "text": chunk,
-            "meta": {
-                "source": doc["filename"],
-                "chunk": i
-            }
-        })
+    texts = []
+    for doc in documents:
+        chunks = splitter.split_text(doc["content"])
+        for i, chunk in enumerate(chunks):
+            texts.append({
+                "text": chunk,
+                "meta": {
+                    "source": doc["filename"],
+                    "chunk": i
+                }
+            })
+    return texts
 
 # 3. تعریف تابع گرفتن امبدینگ با OpenAI API
 
@@ -57,27 +60,31 @@ def embed(text):
     )
     return response.data[0].embedding
 
-# 4. ساخت امبدینگ‌ها برای هر چانک
-for entry in texts:
-    entry["embedding"] = embed(entry["text"])
+# 4. ساخت ایندکس FAISS
+def build_faiss_index(texts):
+    for entry in texts:
+        entry["embedding"] = embed(entry["text"])
+
+    dimension = len(texts[0]["embedding"])
+    index = faiss.IndexFlatL2(dimension)
+
+    vectors = np.array([t["embedding"] for t in texts]).astype("float32")
+    index.add(vectors)
+    return index
+
 
 # 5. ساخت ایندکس FAISS برای جستجوی سریع
-dimension = len(texts[0]["embedding"])
-index = faiss.IndexFlatL2(dimension)
-
-vectors = np.array([t["embedding"] for t in texts]).astype("float32")
-index.add(vectors)
-
-# 6. تابع جستجو در ایندکس
-def search(query, top_k=5):
+def search(index, query, top_k=5):
     query_vector = np.array(embed(query)).astype("float32").reshape(1, -1)
     distances, indices = index.search(query_vector, top_k)
     results = [texts[i] for i in indices[0]]
     return results
 
+
+
 # 7. تولید پاسخ با GPT با استفاده از متن‌های بازیابی شده
-def generate_answer(query):
-    results = search(query)
+def generate_answer(index, texts, query):
+    results = search(index, query)
     context = "\n\n".join([r["text"] for r in results])
 
     prompt = f"""
@@ -102,9 +109,23 @@ Answer the question below using the context provided.
 
     return response.choices[0].message.content
 
-# -- حالا می‌تونی این دو خط رو برای تست کنی --
+# -- اجرای کامل برنامه--
 
 if __name__ == "__main__":
-    query = input("Ask your question: ")
-    answer = generate_answer(query)
-    print("\nAnswer:\n", answer)
+    folder_path = "data/txts"  # ← مسیر پوشه فایل‌های متنی
+    documents = load_documents_from_folder(folder_path)
+
+    if not documents:
+        print("❌ No .txt files found in the folder.")
+        exit()
+
+    texts = split_documents(documents)
+    index = build_faiss_index(texts)
+
+    
+    while True:
+        query = input("\nAsk your question (or type 'exit'): ")
+        if query.lower() == "exit":
+            break
+        answer = generate_answer(index, texts, query)
+        print("\nAnswer:\n", answer)
